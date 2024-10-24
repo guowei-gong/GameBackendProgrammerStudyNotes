@@ -44,3 +44,64 @@ syn，ack，fin，rst 字段的值，创建、断开和维护一个连接。
 - 发送方一直等待窗口打开，接收方一直等待新数据
 做完上面的事情后，带宽可以被充分利用了，但是网络环境是复杂的
 ```
+
+做完上面的事情后，带宽可以被充分利用了，但是网络环境是复杂的，随时可能因为大量数据导致网络上的阻塞，这时候又需要引入阻塞控制等等。
+TCP 复杂的原因，就是要在工程上解决这些问题。
+
+## 为什么需要三次握手？
+首先，需要理解建立连接的目的，如下。
+1. 确定对端在线
+2. 保证包的顺序（因为数据传输是双向的，所以两端都需要确认对端的起始序列号）
+
+三次握手，才能满足第 2 个条件，假如两次握手，至少有一端无法确认对端是否了解你的起始序列号，即：我是服务端，对端发送起始序列号后，我也给对端回复我的起始序列号，此时，回复的数据包丢失，但我无法确认对端是否收到，所以还需要对端再确认一次。
+
+假如，服务端 A 收到客户端 B 发的 SYN ，并回复了 SYN+ACK 后，又收到了另一个客户端 C 的请求，此时 A 会和 C 建立后续的 ESTABLISHED 连接吗？
+当然不会，因为一个新的客户端 IP + Port 都不一样，直接发 ACK 后，TCP 会直接回复 RST，内核通过四元组进行校验，调用 __inet_lookup()进行查找。
+
+```c++
+static inline struct sock *__inet_lookup(...省略函数参数)
+{
+        u16 hnum = ntohs(dport);
+        struct sock *sk;
+
+        // 先检查 established 中是否有连接，如果没有就直接 send_reset
+        sk = __inet_lookup_established(net, hashinfo, saddr, sport,
+                                       daddr, hnum, dif, sdif);
+        *refcounted = true;
+        if (sk)
+                return sk;
+        *refcounted = false;
+        // 再检查 linstener中 是否有连接，如果没有就直接 send_reset
+        return __inet_lookup_listener(net, hashinfo, skb, doff, saddr,
+                                      sport, daddr, hnum, dif, sdif);
+}
+```
+
+通过代码中的注释，可以知道查找分为两步。
+确认连接存在后，如果连接是 TCP_ESTABLISHED 状态，直接开始接收数据，否则开始处理 TCP 的各种状态，TCP 的不同状态如下。
+- 第一次握手， TCP_LISTEN
+- 第三次握手，TCP_SYN_RECV
+服务端在 SYN RECVED 状态下，将在缓存中记录客户端 SYN 包中的内容，以便在收包的过程中查找。该内容占用的 SLAB 缓存。
+SLAB 机制是 Linux 内核中的一种内存管理机制，用于管理小块内存的分配，通过对内核中经常使用的对象进行缓存和释放，SLAB可以有效减少分配小块连续内存时产生的内部碎片
+TCP 包占用 SLAB 缓存是有上限的，上限值决定了 TCP 在正常状态下，可以维持多少个 TCP_SYN_RECVED 状态的连接，即半连接数，该值默认情况根据总内存大小自动生成，内存越大值越大。半连接以队列的形式存储。
+
+## 半连接队列被耗尽怎么办？
+回答这个问题需要先理解几个概念，如下。
+- syncookie
+- request_sock_queue 结构体中的 qlen
+- TFO - TCP Fast Open
+先抛出几个结论，当 syncookie 开启的情况，半连接队列可认为无上限。
+request_sock_queue 结构体中的 qlen 会在 tcp_conn_request() 函数执行结束后增加，即 qlen 为服务器 listen 端口的半连接队列的当前长度。
+
+```c++
+if (!net->ipv4.sysctl_tcp_syncookies &&
+                    (net->ipv4.sysctl_max_syn_backlog - inet_csk_reqsk_queue_len(sk) <
+                     (net->ipv4.sysctl_max_syn_backlog >> 2)) &&
+                    !tcp_peer_is_proven(req, dst)) {
+```
+
+当 sysctl_tcp_syncookies 未开启时，如果当前半连接池剩余长度，小于最大长度的四分之一后，就不再处理新建连接请求了，这也就是著名的 synflood 攻击的原理。
+syncookie 的作用就是为了防止 synflood。
+
+## syncookie 如何防止 synflood?
+已明确 synflood 是针对半连接队列的攻击，那我们可以想办法绕过半连接池，能不能让服务端不记录第一次握手发过来的 SYN 四元组信息，同时还能在第三次握手的时候验证呢？其实是可能的，既然三次握手的第二次是服务端回包，那可以把第一次握手得到的消息放回包里，让客户端在第三次握手的时候再把这个信息带回来，然后我们拿到第三次握手的四元组信息后，再做验证。为了保证包内容尽量小，我们把数据放到包之前，做一下 hash 运算（根据四元组信息和当前时间），运算得到的结果就叫 cookie。
