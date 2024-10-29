@@ -2,7 +2,7 @@
 
 ## TCP/IP详解 卷1：协议
 
-![](./Pictures/TCP:IP%20Illustrated-%20The%20Protocols,%20Volume%201.jpg)
+![](./Pictures/TCP-IP%20Illustrated-%20The%20Protocols,%20Volume%201.jpg)
 
 * 第1章 概述
 
