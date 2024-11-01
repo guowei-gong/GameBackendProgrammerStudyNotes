@@ -10,6 +10,12 @@
 
 ![](./Pictures/Computer%20Systems-%20A%20Programmer's%20Perspective.jpg)
 
+## 现代操作系统（原书第4版）
+
+![](./Pictures/Modern%20Operating%20Systems.jpg)
+
+* 第2章 进程与线程
+
 ## 操作系统导论
 
 ![](./Pictures/Operating%20Systems-%20Three%20Easy%20Pieces.jpg)
